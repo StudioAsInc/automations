@@ -1,0 +1,27 @@
+name: Jules GH Automation
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: 'Prompt to send (leave empty to use JULES_GH_AUTOMATION_PROMPT.md)'
+        required: false
+        default: ''
+
+jobs:
+  automate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Send prompt to Jules session
+        run: |
+          PROMPT="${{ github.event.inputs.prompt }}"
+          [ -z "$PROMPT" ] && PROMPT=$(cat JULES_GH_AUTOMATION_PROMPT.md)
+          curl -fsSL -X POST \
+            "https://jules.googleapis.com/v1alpha/sessions/1044530857172478402:sendMessage" \
+            -H "x-goog-api-key: ${{ secrets.JULES_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg p "$PROMPT" '{"prompt": $p}')"
