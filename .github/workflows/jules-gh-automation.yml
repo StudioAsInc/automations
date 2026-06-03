@@ -1,0 +1,21 @@
+name: Jules GH Automation
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+jobs:
+  automate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read prompt
+        id: prompt
+        run: echo "content<<EOF" >> $GITHUB_OUTPUT && cat JULES_GH_AUTOMATION_PROMPT.md >> $GITHUB_OUTPUT && echo "EOF" >> $GITHUB_OUTPUT
+
+      - uses: google-labs-code/jules-invoke@v1
+        with:
+          prompt: ${{ steps.prompt.outputs.content }}
+          jules_api_key: ${{ secrets.JULES_API_KEY }}
