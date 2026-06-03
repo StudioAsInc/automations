@@ -23,7 +23,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PAT }}
           KILO_API_KEY: ${{ secrets.KILO_API_KEY }}
-          KILO_MODEL: kilo-auto/free
+          KILO_MODEL: x-ai/grok-code-fast-1:optimized:free
         run: |
           PROMPT="${{ github.event.inputs.prompt }}"
           [ -z "$PROMPT" ] && PROMPT=$(cat KILO_GH_AUTOMATION_PROMPT.md)
