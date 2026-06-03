@@ -1,0 +1,30 @@
+name: Kilo GH Automation
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: 'Prompt to send (leave empty to use KILO_GH_AUTOMATION_PROMPT.md)'
+        required: false
+        default: ''
+
+jobs:
+  automate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Kilo CLI
+        run: npm install -g @kilocode/cli
+
+      - name: Run Kilo automation
+        env:
+          GH_TOKEN: ${{ secrets.PAT }}
+          KILO_API_KEY: ${{ secrets.KILO_API_KEY }}
+          KILO_MODEL: kilo-auto/free
+        run: |
+          PROMPT="${{ github.event.inputs.prompt }}"
+          [ -z "$PROMPT" ] && PROMPT=$(cat KILO_GH_AUTOMATION_PROMPT.md)
+          kilo run "$PROMPT" --auto
