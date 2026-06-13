@@ -4,6 +4,7 @@ import datetime
 import os
 import re
 
+# Jules GitHub Automation Agent Script 🤖
 # Rule: Always use emojis in every comment or message you post. 🚀✨📦
 
 def run_gh_cmd(cmd):
@@ -36,7 +37,7 @@ def get_all_repos():
 
 def triage_issues(repo):
     """Triage new/unlabeled issues and manage duplicates."""
-    issues_json = run_gh_cmd(["issue", "list", "-R", repo, "--state", "open", "--json", "number,title,labels,body,createdAt"])
+    issues_json = run_gh_cmd(["issue", "list", "-R", repo, "--state", "open", "--json", "number,title,labels,body"])
     if not issues_json: return
 
     issues = json.loads(issues_json)
@@ -55,7 +56,7 @@ def triage_issues(repo):
             run_gh_cmd(["issue", "comment", str(issue["number"]), "-R", repo,
                         "--body", f"Hello! 👋 I've acknowledged this issue and added the '{label}' label. A human will review this soon! 🚀"])
 
-        # Duplicate check (Title similarity)
+        # Duplicate check (Simple title match)
         for other in issues:
             if other["number"] < issue["number"] and other["title"].strip().lower() == issue["title"].strip().lower():
                 print(f"🔗 Flagging duplicate issue #{issue['number']} in {repo}")
@@ -88,9 +89,7 @@ def review_prs(repo):
     now = datetime.datetime.now(datetime.timezone.utc)
 
     for pr in prs:
-        summary = "👋 PR status summary:\n"
         problems = []
-
         if pr["mergeable"] == "CONFLICTING":
             problems.append("⚠️ This PR has merge conflicts.")
         if not pr.get("body") or len(pr["body"].strip()) < 10:
@@ -102,8 +101,55 @@ def review_prs(repo):
 
         if problems:
             print(f"📝 Posting summary on PR #{pr['number']} in {repo}")
-            summary += "\n".join([f"- {p}" for p in problems])
+            summary = "👋 PR status summary:\n" + "\n".join([f"- {p}" for p in problems])
             run_gh_cmd(["pr", "comment", str(pr["number"]), "-R", repo, "--body", summary + "\nPlease take a look! ✨"])
+
+def handle_ci_failures(repo):
+    """Detect CI failures and leave a diagnostic comment."""
+    prs_json = run_gh_cmd(["pr", "list", "-R", repo, "--state", "open", "--json", "number"])
+    if not prs_json: return
+
+    prs = json.loads(prs_json)
+    for pr in prs:
+        checks_json = run_gh_cmd(["pr", "checks", str(pr["number"]), "-R", repo, "--json", "status,conclusion,name,link"])
+        if checks_json:
+            checks = json.loads(checks_json)
+            failed = [c for c in (checks if isinstance(checks, list) else [checks]) if c.get("conclusion") == "failure"]
+            if failed:
+                print(f"❌ CI failure in {repo} PR #{pr['number']}")
+                msg = "🚨 **CI Failure Detected!**\nThe following checks failed:\n"
+                for f in failed:
+                    msg += f"- {f['name']} ({f['link']})\n"
+                run_gh_cmd(["pr", "comment", str(pr["number"]), "-R", repo, "--body", msg + "\nI am analyzing the logs... 🔍"])
+
+def scan_security_and_hygiene(repo):
+    """Identify missing essentials and secrets (metadata-based)."""
+    # Check for missing LICENSE/README/.gitignore
+    files_stdout = run_gh_cmd(["api", f"repos/{repo}/contents", "--jq", ".[].name"])
+    if files_stdout:
+        files = [f.lower() for f in files_stdout.splitlines()]
+        missing = []
+        if not any(f.startswith("readme") for f in files): missing.append("README.md")
+        if not any(f.startswith("license") for f in files): missing.append("LICENSE")
+        if ".gitignore" not in files: missing.append(".gitignore")
+        if missing:
+            print(f"📦 Repo {repo} is missing: {', '.join(missing)}")
+
+def branch_hygiene(repo):
+    """Delete merged branches older than 2 days."""
+    prs_json = run_gh_cmd(["pr", "list", "-R", repo, "--state", "merged", "--limit", "50", "--json", "headRefName,mergedAt"])
+    if not prs_json: return
+
+    prs = json.loads(prs_json)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    for pr in prs:
+        if pr["mergedAt"]:
+            merged_at = datetime.datetime.fromisoformat(pr["mergedAt"].replace("Z", "+00:00"))
+            if (now - merged_at).days > 2:
+                branch = pr["headRefName"]
+                if branch not in ["main", "master", "develop", "dev"]:
+                    print(f"🧹 Deleting old merged branch '{branch}' in {repo}")
+                    run_gh_cmd(["api", "-X", "DELETE", f"repos/{repo}/git/refs/heads/{branch}"])
 
 def main():
     repos = get_all_repos()
@@ -112,6 +158,9 @@ def main():
         triage_issues(repo)
         manage_stale_issues(repo)
         review_prs(repo)
+        handle_ci_failures(repo)
+        branch_hygiene(repo)
+        scan_security_and_hygiene(repo)
     print("✨ GitHub Automation Cycle Complete! ✨")
 
 if __name__ == "__main__":
