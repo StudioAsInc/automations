@@ -49,8 +49,6 @@ def triage_issues(repo):
             title_lower = issue["title"].lower()
             if any(word in title_lower for word in ["bug", "fix", "error", "crash", "fail"]):
                 label = "bug"
-            elif any(word in title_lower for word in ["docs", "readme", "documentation"]):
-                label = "documentation"
 
             run_gh_cmd(["issue", "edit", str(issue["number"]), "-R", repo, "--add-label", label])
             run_gh_cmd(["issue", "comment", str(issue["number"]), "-R", repo,
@@ -120,10 +118,13 @@ def handle_ci_failures(repo):
                 msg = "🚨 **CI Failure Detected!**\nThe following checks failed:\n"
                 for f in failed:
                     msg += f"- {f['name']} ({f['link']})\n"
-                run_gh_cmd(["pr", "comment", str(pr["number"]), "-R", repo, "--body", msg + "\nI am analyzing the logs... 🔍"])
+                # Avoid duplicate comments
+                comments = run_gh_cmd(["pr", "view", str(pr["number"]), "-R", repo, "--json", "comments"])
+                if comments and "CI Failure Detected!" not in comments:
+                    run_gh_cmd(["pr", "comment", str(pr["number"]), "-R", repo, "--body", msg + "\nI am analyzing the logs... 🔍"])
 
-def scan_security_and_hygiene(repo):
-    """Identify missing essentials and secrets (metadata-based)."""
+def scan_security_and_essentials(repo):
+    """Identify missing essentials and metadata-level security concerns."""
     # Check for missing LICENSE/README/.gitignore
     files_stdout = run_gh_cmd(["api", f"repos/{repo}/contents", "--jq", ".[].name"])
     if files_stdout:
@@ -160,7 +161,7 @@ def main():
         review_prs(repo)
         handle_ci_failures(repo)
         branch_hygiene(repo)
-        scan_security_and_hygiene(repo)
+        scan_security_and_essentials(repo)
     print("✨ GitHub Automation Cycle Complete! ✨")
 
 if __name__ == "__main__":
