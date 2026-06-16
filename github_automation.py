@@ -4,8 +4,7 @@ import datetime
 import os
 import re
 
-# Jules GitHub Automation Agent Script 🤖
-# Rule: Always use emojis in every comment or message you post. 🚀✨📦
+# Rule: Always use emojis in every comment or message you post. 🤖🚀✨📦
 
 def run_gh_cmd(cmd):
     """Utility to run gh cli commands."""
@@ -73,7 +72,7 @@ def manage_stale_issues(repo):
         updated_at = datetime.datetime.fromisoformat(issue["updatedAt"].replace("Z", "+00:00"))
         if (now - updated_at).days > 14:
             if not any(l["name"] == "stale" for l in issue["labels"]):
-                print(f"😴 Marking issue #{issue['number']} in {repo} as stale")
+                print(f"Marking stale issue #{issue['number']} in {repo}")
                 run_gh_cmd(["issue", "edit", str(issue["number"]), "-R", repo, "--add-label", "stale"])
                 run_gh_cmd(["issue", "comment", str(issue["number"]), "-R", repo,
                             "--body", "This issue hasn't had any activity for over 14 days. Is this still relevant? 😴"])
@@ -87,7 +86,9 @@ def review_prs(repo):
     now = datetime.datetime.now(datetime.timezone.utc)
 
     for pr in prs:
+        summary = "👋 PR status summary:\n"
         problems = []
+
         if pr["mergeable"] == "CONFLICTING":
             problems.append("⚠️ This PR has merge conflicts.")
         if not pr.get("body") or len(pr["body"].strip()) < 10:
@@ -99,7 +100,7 @@ def review_prs(repo):
 
         if problems:
             print(f"📝 Posting summary on PR #{pr['number']} in {repo}")
-            summary = "👋 PR status summary:\n" + "\n".join([f"- {p}" for p in problems])
+            summary += "\n".join([f"- {p}" for p in problems])
             run_gh_cmd(["pr", "comment", str(pr["number"]), "-R", repo, "--body", summary + "\nPlease take a look! ✨"])
 
 def handle_ci_failures(repo):
@@ -122,19 +123,6 @@ def handle_ci_failures(repo):
                 comments = run_gh_cmd(["pr", "view", str(pr["number"]), "-R", repo, "--json", "comments"])
                 if comments and "CI Failure Detected!" not in comments:
                     run_gh_cmd(["pr", "comment", str(pr["number"]), "-R", repo, "--body", msg + "\nI am analyzing the logs... 🔍"])
-
-def scan_security_and_essentials(repo):
-    """Identify missing essentials and metadata-level security concerns."""
-    # Check for missing LICENSE/README/.gitignore
-    files_stdout = run_gh_cmd(["api", f"repos/{repo}/contents", "--jq", ".[].name"])
-    if files_stdout:
-        files = [f.lower() for f in files_stdout.splitlines()]
-        missing = []
-        if not any(f.startswith("readme") for f in files): missing.append("README.md")
-        if not any(f.startswith("license") for f in files): missing.append("LICENSE")
-        if ".gitignore" not in files: missing.append(".gitignore")
-        if missing:
-            print(f"📦 Repo {repo} is missing: {', '.join(missing)}")
 
 def branch_hygiene(repo):
     """Delete merged branches older than 2 days."""
@@ -161,7 +149,6 @@ def main():
         review_prs(repo)
         handle_ci_failures(repo)
         branch_hygiene(repo)
-        scan_security_and_essentials(repo)
     print("✨ GitHub Automation Cycle Complete! ✨")
 
 if __name__ == "__main__":
