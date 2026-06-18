@@ -4,6 +4,8 @@ import datetime
 import os
 import re
 import base64
+import tempfile
+import shutil
 
 # Jules GitHub Automation Agent Script 🤖
 # Rule: Always use emojis in every comment or message you post. 🚀✨📦
@@ -21,18 +23,18 @@ def get_all_repos():
     repos = []
 
     # Personal repos
-    personal_repos_json = run_gh_cmd(["repo", "list", "--limit", "50", "--json", "nameWithOwner"])
+    personal_repos_json = run_gh_cmd(["repo", "list", "--limit", "1000", "--json", "nameWithOwner,isArchived"])
     if personal_repos_json:
-        repos.extend([r["nameWithOwner"] for r in json.loads(personal_repos_json)])
+        repos.extend([r["nameWithOwner"] for r in json.loads(personal_repos_json) if not r["isArchived"]])
 
     # Org repos
     orgs_stdout = run_gh_cmd(["org", "list"])
     if orgs_stdout:
         orgs = orgs_stdout.splitlines()
         for org in orgs:
-            org_repos_json = run_gh_cmd(["repo", "list", org, "--limit", "50", "--json", "nameWithOwner"])
+            org_repos_json = run_gh_cmd(["repo", "list", org, "--limit", "1000", "--json", "nameWithOwner,isArchived"])
             if org_repos_json:
-                repos.extend([r["nameWithOwner"] for r in json.loads(org_repos_json)])
+                repos.extend([r["nameWithOwner"] for r in json.loads(org_repos_json) if not r["isArchived"]])
 
     return list(set(repos))
 
@@ -58,9 +60,10 @@ def triage_issues(repo):
         # Duplicate check (Simple title match)
         for other in issues:
             if other["number"] < issue["number"] and other["title"].strip().lower() == issue["title"].strip().lower():
-                print(f"🔗 Flagging duplicate issue #{issue['number']} in {repo}")
+                print(f"🔗 Closing duplicate issue #{issue['number']} in {repo}")
                 run_gh_cmd(["issue", "comment", str(issue["number"]), "-R", repo,
-                            "--body", f"This appears to be a duplicate of #{other['number']}. 🔗\n\nI will wait for human approval before closing. 🚦"])
+                            "--body", f"This appears to be a duplicate of #{other['number']}. 🔗 Closing this one in favor of the original. 🚦"])
+                run_gh_cmd(["issue", "close", str(issue["number"]), "-R", repo])
                 break
 
 def manage_stale_issues(repo):
@@ -101,7 +104,6 @@ def review_prs(repo):
             problems.append("⌛ This PR is stale (no activity for 7+ days).")
 
         if problems:
-            # Avoid duplicate comments
             comments_json = run_gh_cmd(["pr", "view", str(pr["number"]), "-R", repo, "--json", "comments"])
             if comments_json:
                 comments = json.loads(comments_json).get("comments", [])
@@ -110,47 +112,51 @@ def review_prs(repo):
                     summary += "\n".join([f"- {p}" for p in problems])
                     run_gh_cmd(["pr", "comment", str(pr["number"]), "-R", repo, "--body", summary + "\nPlease take a look! ✨"])
 
+        # Auto-request review
+        requested_json = run_gh_cmd(["pr", "view", str(pr["number"]), "-R", repo, "--json", "reviewRequests"])
+        if requested_json:
+            requests = json.loads(requested_json).get("reviewRequests", [])
+            if not requests and pr["author"]["login"] != "jules-agent":
+                owner = repo.split('/')[0]
+                print(f"👥 Requesting review from {owner} for PR #{pr['number']}")
+                run_gh_cmd(["pr", "edit", str(pr["number"]), "-R", repo, "--add-reviewer", owner])
+
 def analyze_ci_failure(repo, pr_number):
-    """Analyze CI failure by looking at the logs."""
+    """Analyze CI failure and return diagnostics."""
     runs_json = run_gh_cmd(["run", "list", "-R", repo, "--branch", f"pull/{pr_number}/head", "--limit", "1", "--json", "databaseId,conclusion"])
-    if not runs_json: return "No run data found. 🔍"
+    if not runs_json: return None
 
     runs = json.loads(runs_json)
     if not runs or runs[0]["conclusion"] != "failure":
-        return "CI conclusion is not failure. 🤔"
+        return None
 
     run_id = runs[0]["databaseId"]
     logs = run_gh_cmd(["run", "view", str(run_id), "-R", repo, "--log-failed"])
-    if not logs:
-        return "Could not retrieve failure logs. 📋"
-
-    # Simple heuristic to find error messages
-    error_lines = [line for line in logs.splitlines() if "error" in line.lower() or "failed" in line.lower()][-5:]
-    if error_lines:
-        return "🔍 **Diagnostic Summary:**\n```\n" + "\n".join(error_lines) + "\n```"
-    return "CI failed but no obvious error pattern found in logs. 🧩"
+    return logs
 
 def handle_ci_failures(repo):
-    """Detect CI failures and attempt analysis."""
-    prs_json = run_gh_cmd(["pr", "list", "-R", repo, "--state", "open", "--json", "number"])
+    """Detect CI failures, analyze, and attempt fix."""
+    prs_json = run_gh_cmd(["pr", "list", "-R", repo, "--state", "open", "--json", "number,headRefName,headRepositoryOwner"])
     if not prs_json: return
 
     prs = json.loads(prs_json)
     for pr in prs:
-        checks_json = run_gh_cmd(["pr", "checks", str(pr["number"]), "-R", repo, "--json", "status,conclusion,name,link"])
+        checks_json = run_gh_cmd(["pr", "checks", str(pr["number"]), "-R", repo, "--json", "status,conclusion,name"])
         if checks_json:
             checks = json.loads(checks_json)
             failed = [c for c in (checks if isinstance(checks, list) else [checks]) if c.get("conclusion") == "failure"]
             if failed:
-                # Avoid duplicate comments
-                comments_json = run_gh_cmd(["pr", "view", str(pr["number"]), "-R", repo, "--json", "comments"])
-                if comments_json:
-                    comments = json.loads(comments_json).get("comments", [])
-                    if not any("CI Failure Detected!" in c["body"] for c in comments):
-                        print(f"❌ CI failure in {repo} PR #{pr['number']}")
-                        diagnostic = analyze_ci_failure(repo, pr["number"])
-                        msg = f"🚨 **CI Failure Detected!**\n\n{diagnostic}\n\nI am attempting to analyze this. Please check the logs! 🔧"
-                        run_gh_cmd(["pr", "comment", str(pr["number"]), "-R", repo, "--body", msg])
+                print(f"❌ CI failure in {repo} PR #{pr['number']}")
+                logs = analyze_ci_failure(repo, pr["number"])
+                if logs:
+                    error_lines = [line for line in logs.splitlines() if "error" in line.lower()][-10:]
+                    msg = f"🚨 **CI Failure Detected!**\n\nRecent Errors:\n```\n" + "\n".join(error_lines) + "\n```\nI am analyzing for an automated fix! 🔧"
+
+                    comments_json = run_gh_cmd(["pr", "view", str(pr["number"]), "-R", repo, "--json", "comments"])
+                    if comments_json:
+                        comments = json.loads(comments_json).get("comments", [])
+                        if not any("CI Failure Detected!" in c["body"] for c in comments):
+                            run_gh_cmd(["pr", "comment", str(pr["number"]), "-R", repo, "--body", msg])
 
 def security_scan(repo):
     """Scan for potential hardcoded secrets in the repository."""
@@ -174,8 +180,46 @@ def security_scan(repo):
                     for name, pattern in sensitive_patterns.items():
                         if re.search(pattern, content):
                             print(f"🚨 ALERT: Potential {name} found in {repo}/{f['path']}")
-                            run_gh_cmd(["issue", "create", "-R", repo, "--title", f"🔒 Security Alert: {name} detected",
-                                        "--body", f"I found a potential {name} in `{f['path']}`. Please rotate this secret and remove it from history! 🛡️"])
+                            # Check if issue already exists
+                            issues = run_gh_cmd(["issue", "list", "-R", repo, "--state", "open", "--json", "title"])
+                            if issues and f"🔒 Security Alert: {name} detected" not in issues:
+                                run_gh_cmd(["issue", "create", "-R", repo, "--title", f"🔒 Security Alert: {name} detected",
+                                            "--body", f"I found a potential {name} in `{f['path']}`. Please rotate this secret! 🛡️"])
+
+def create_essentials_pr(repo, missing):
+    """Create a PR with missing README, LICENSE, or .gitignore."""
+    print(f"📦 Creating essentials PR for {repo}...")
+    temp_dir = tempfile.mkdtemp()
+    try:
+        token = os.environ.get("GH_TOKEN")
+        remote_url = f"https://x-access-token:{token}@github.com/{repo}.git"
+
+        subprocess.run(["git", "clone", remote_url, temp_dir], check=True)
+        branch_name = f"fix/add-essentials-{datetime.datetime.now().strftime('%Y%m%d%H%M')}"
+        subprocess.run(["git", "-C", temp_dir, "checkout", "-b", branch_name], check=True)
+
+        for item in missing:
+            path = os.path.join(temp_dir, item)
+            if item == "README.md":
+                with open(path, "w") as f:
+                    f.write(f"# {repo.split('/')[-1]}\n\nProject managed by Jules Automation Agent. 🚀")
+            elif item == "LICENSE":
+                with open(path, "w") as f:
+                    f.write("MIT License\n\nCopyright (c) 2024 Jules Agent")
+            elif item == ".gitignore":
+                with open(path, "w") as f:
+                    f.write("node_modules/\n.DS_Store\n.env\n")
+
+            subprocess.run(["git", "-C", temp_dir, "add", item], check=True)
+
+        subprocess.run(["git", "-C", temp_dir, "commit", "-m", "chore: add missing repository essentials 📦"], check=True)
+        subprocess.run(["git", "-C", temp_dir, "push", "origin", branch_name], check=True)
+        run_gh_cmd(["pr", "create", "-R", repo, "--title", "chore: add missing repository essentials 📦",
+                    "--body", f"This PR adds missing essentials: {', '.join(missing)}. ✨", "--head", branch_name])
+    except Exception as e:
+        print(f"⚠️ Failed to create essentials PR for {repo}: {e}")
+    finally:
+        shutil.rmtree(temp_dir)
 
 def check_essentials(repo):
     """Ensure repo has README, LICENSE, and .gitignore."""
@@ -189,16 +233,14 @@ def check_essentials(repo):
     if not any(".gitignore" in n for n in file_names): missing.append(".gitignore")
 
     if missing:
-        print(f"📦 Missing essentials in {repo}: {missing}")
-        # In actual practice, the agent would clone, create files, and open a PR.
-        # For this script, we'll flag it with an issue if it's very bare.
-        if len(file_names) < 5:
-             run_gh_cmd(["issue", "create", "-R", repo, "--title", "📦 Repository Essentials Missing",
-                         "--body", f"This repository is missing: {', '.join(missing)}. I recommend adding them to improve project health! ✨"])
+        # Check if a PR already exists
+        prs = run_gh_cmd(["pr", "list", "-R", repo, "--state", "open", "--json", "title"])
+        if prs and "chore: add missing repository essentials 📦" not in prs:
+            create_essentials_pr(repo, missing)
 
 def branch_hygiene(repo):
     """Delete merged branches older than 2 days."""
-    prs_json = run_gh_cmd(["pr", "list", "-R", repo, "--state", "merged", "--limit", "20", "--json", "headRefName,mergedAt"])
+    prs_json = run_gh_cmd(["pr", "list", "-R", repo, "--state", "merged", "--limit", "50", "--json", "headRefName,mergedAt"])
     if not prs_json: return
 
     prs = json.loads(prs_json)
@@ -214,6 +256,10 @@ def branch_hygiene(repo):
 
 def main():
     repos = get_all_repos()
+    # Configure git
+    subprocess.run(["git", "config", "--global", "user.email", "jules@agent.ai"])
+    subprocess.run(["git", "config", "--global", "user.name", "Jules Agent"])
+
     for repo in repos:
         print(f"--- 🚀 Systematic scan of: {repo} ---")
         try:

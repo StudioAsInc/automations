@@ -1,0 +1,9 @@
+TheRealAshik/Github
+TheRealAshik/jules-sdk
+TheRealAshik/Portfolio-Ashik
+TheRealAshik/HSC
+TheRealAshik/Jules
+TheRealAshik/pc
+StudioAsInc/automations
+synapseSRC/synapseApp
+synapseSRC/synapseWeb
