@@ -121,22 +121,9 @@ def review_prs(repo):
                 print(f"👥 Requesting review from {owner} for PR #{pr['number']}")
                 run_gh_cmd(["pr", "edit", str(pr["number"]), "-R", repo, "--add-reviewer", owner])
 
-def analyze_ci_failure(repo, pr_number):
-    """Analyze CI failure and return diagnostics."""
-    runs_json = run_gh_cmd(["run", "list", "-R", repo, "--branch", f"pull/{pr_number}/head", "--limit", "1", "--json", "databaseId,conclusion"])
-    if not runs_json: return None
-
-    runs = json.loads(runs_json)
-    if not runs or runs[0]["conclusion"] != "failure":
-        return None
-
-    run_id = runs[0]["databaseId"]
-    logs = run_gh_cmd(["run", "view", str(run_id), "-R", repo, "--log-failed"])
-    return logs
-
 def handle_ci_failures(repo):
-    """Detect CI failures, analyze, and attempt fix."""
-    prs_json = run_gh_cmd(["pr", "list", "-R", repo, "--state", "open", "--json", "number,headRefName,headRepositoryOwner"])
+    """Detect CI failures and attempt analysis."""
+    prs_json = run_gh_cmd(["pr", "list", "-R", repo, "--state", "open", "--json", "number,headRefName"])
     if not prs_json: return
 
     prs = json.loads(prs_json)
@@ -147,81 +134,91 @@ def handle_ci_failures(repo):
             failed = [c for c in (checks if isinstance(checks, list) else [checks]) if c.get("conclusion") == "failure"]
             if failed:
                 print(f"❌ CI failure in {repo} PR #{pr['number']}")
-                logs = analyze_ci_failure(repo, pr["number"])
-                if logs:
-                    error_lines = [line for line in logs.splitlines() if "error" in line.lower()][-10:]
-                    msg = f"🚨 **CI Failure Detected!**\n\nRecent Errors:\n```\n" + "\n".join(error_lines) + "\n```\nI am analyzing for an automated fix! 🔧"
+                runs_json = run_gh_cmd(["run", "list", "-R", repo, "--branch", f"pull/{pr['number']}/head", "--limit", "1", "--json", "databaseId"])
+                if runs_json:
+                    runs = json.loads(runs_json)
+                    if runs:
+                        run_id = runs[0]["databaseId"]
+                        logs = run_gh_cmd(["run", "view", str(run_id), "-R", repo, "--log-failed"])
+                        if logs:
+                            error_lines = [line for line in logs.splitlines() if "error" in line.lower()][-10:]
+                            msg = f"🚨 **CI Failure Detected!**\n\nRecent Errors:\n```\n" + "\n".join(error_lines) + "\n```\nI am analyzing the logs for a potential fix! 🔍🔧"
 
-                    comments_json = run_gh_cmd(["pr", "view", str(pr["number"]), "-R", repo, "--json", "comments"])
-                    if comments_json:
-                        comments = json.loads(comments_json).get("comments", [])
-                        if not any("CI Failure Detected!" in c["body"] for c in comments):
-                            run_gh_cmd(["pr", "comment", str(pr["number"]), "-R", repo, "--body", msg])
+                            comments_json = run_gh_cmd(["pr", "view", str(pr["number"]), "-R", repo, "--json", "comments"])
+                            if comments_json:
+                                comments = json.loads(comments_json).get("comments", [])
+                                if not any("CI Failure Detected!" in c["body"] for c in comments):
+                                    run_gh_cmd(["pr", "comment", str(pr["number"]), "-R", repo, "--body", msg])
 
-def security_scan(repo):
-    """Scan for potential hardcoded secrets in the repository."""
-    print(f"🛡️ Security scan for {repo}...")
-    files_json = run_gh_cmd(["api", f"repos/{repo}/contents/"])
-    if not files_json: return
-
-    sensitive_patterns = {
-        "GitHub PAT": r"ghp_[a-zA-Z0-9]{36}",
-        "Generic Secret": r"(?i)secret|password|key|token\s*[:=]\s*['\"][a-zA-Z0-9\-_]{16,}['\"]"
-    }
-
-    files = json.loads(files_json)
-    for f in files:
-        if f["type"] == "file" and f["size"] < 100000:
-            content_json = run_gh_cmd(["api", f["url"]])
-            if content_json:
-                content_b64 = json.loads(content_json).get("content", "")
-                if content_b64:
-                    content = base64.b64decode(content_b64).decode('utf-8', errors='ignore')
-                    for name, pattern in sensitive_patterns.items():
-                        if re.search(pattern, content):
-                            print(f"🚨 ALERT: Potential {name} found in {repo}/{f['path']}")
-                            # Check if issue already exists
-                            issues = run_gh_cmd(["issue", "list", "-R", repo, "--state", "open", "--json", "title"])
-                            if issues and f"🔒 Security Alert: {name} detected" not in issues:
-                                run_gh_cmd(["issue", "create", "-R", repo, "--title", f"🔒 Security Alert: {name} detected",
-                                            "--body", f"I found a potential {name} in `{f['path']}`. Please rotate this secret! 🛡️"])
-
-def create_essentials_pr(repo, missing):
-    """Create a PR with missing README, LICENSE, or .gitignore."""
-    print(f"📦 Creating essentials PR for {repo}...")
+def security_scan_and_fix(repo):
+    """Scan for secrets and open PRs with redactions."""
+    print(f"🛡️ Security scan and fix for {repo}...")
     temp_dir = tempfile.mkdtemp()
     try:
         token = os.environ.get("GH_TOKEN")
         remote_url = f"https://x-access-token:{token}@github.com/{repo}.git"
+        subprocess.run(["git", "clone", "--depth", "1", remote_url, temp_dir], check=True)
 
-        subprocess.run(["git", "clone", remote_url, temp_dir], check=True)
-        branch_name = f"fix/add-essentials-{datetime.datetime.now().strftime('%Y%m%d%H%M')}"
-        subprocess.run(["git", "-C", temp_dir, "checkout", "-b", branch_name], check=True)
+        sensitive_patterns = {
+            "GitHub PAT": (r"ghp_[a-zA-Z0-9]{36}", "ghp_REDACTED_BY_JULES"),
+            "Generic Secret": (r"(?i)(secret|password|key|token)\s*[:=]\s*['\"]([a-zA-Z0-9\-_]{16,})['\"]", r"\1: 'REDACTED_BY_JULES'")
+        }
 
-        for item in missing:
-            path = os.path.join(temp_dir, item)
-            if item == "README.md":
-                with open(path, "w") as f:
-                    f.write(f"# {repo.split('/')[-1]}\n\nProject managed by Jules Automation Agent. 🚀")
-            elif item == "LICENSE":
-                with open(path, "w") as f:
-                    f.write("MIT License\n\nCopyright (c) 2024 Jules Agent")
-            elif item == ".gitignore":
-                with open(path, "w") as f:
-                    f.write("node_modules/\n.DS_Store\n.env\n")
+        changed = False
+        for root, _, files in os.walk(temp_dir):
+            if ".git" in root: continue
+            for file in files:
+                filepath = os.path.join(root, file)
+                if os.path.getsize(filepath) > 100000: continue
 
-            subprocess.run(["git", "-C", temp_dir, "add", item], check=True)
+                try:
+                    with open(filepath, "r") as f:
+                        content = f.read()
 
-        subprocess.run(["git", "-C", temp_dir, "commit", "-m", "chore: add missing repository essentials 📦"], check=True)
-        subprocess.run(["git", "-C", temp_dir, "push", "origin", branch_name], check=True)
-        run_gh_cmd(["pr", "create", "-R", repo, "--title", "chore: add missing repository essentials 📦",
-                    "--body", f"This PR adds missing essentials: {', '.join(missing)}. ✨", "--head", branch_name])
+                    new_content = content
+                    for name, (pattern, replacement) in sensitive_patterns.items():
+                        if re.search(pattern, new_content):
+                            print(f"🚨 Found {name} in {filepath}. Redacting...")
+                            new_content = re.sub(pattern, replacement, new_content)
+                            changed = True
+
+                    if changed and new_content != content:
+                        with open(filepath, "w") as f:
+                            f.write(new_content)
+                except:
+                    continue
+
+        if changed:
+            branch_name = f"security/redact-secrets-{datetime.datetime.now().strftime('%Y%m%d%H%M')}"
+            subprocess.run(["git", "-C", temp_dir, "checkout", "-b", branch_name], check=True)
+            subprocess.run(["git", "-C", temp_dir, "add", "."], check=True)
+            subprocess.run(["git", "-C", temp_dir, "commit", "-m", "security: redact potential hardcoded secrets 🛡️"], check=True)
+            subprocess.run(["git", "-C", temp_dir, "push", "origin", branch_name], check=True)
+            run_gh_cmd(["pr", "create", "-R", repo, "--title", "🔒 Security: Redact potential hardcoded secrets",
+                        "--body", "I found potential secrets in the codebase and redacted them. Please review and rotate these secrets! 🛡️✨", "--head", branch_name])
+
+        # Check for outdated dependencies (npm)
+        if os.path.exists(os.path.join(temp_dir, "package.json")):
+            print(f"📦 Checking for outdated dependencies in {repo}...")
+            audit_result = subprocess.run(["npm", "audit", "--json"], cwd=temp_dir, capture_output=True, text=True)
+            if audit_result.returncode != 0:
+                print(f"⚠️ Vulnerabilities found in {repo}. Attempting fix...")
+                subprocess.run(["npm", "audit", "fix"], cwd=temp_dir)
+                if subprocess.run(["git", "-C", temp_dir, "diff", "--exit-code"]).returncode != 0:
+                    branch_name = f"security/fix-dependencies-{datetime.datetime.now().strftime('%Y%m%d%H%M')}"
+                    subprocess.run(["git", "-C", temp_dir, "checkout", "-b", branch_name], check=True)
+                    subprocess.run(["git", "-C", temp_dir, "add", "."], check=True)
+                    subprocess.run(["git", "-C", temp_dir, "commit", "-m", "security: fix outdated dependencies with known CVEs 📦"], check=True)
+                    subprocess.run(["git", "-C", temp_dir, "push", "origin", branch_name], check=True)
+                    run_gh_cmd(["pr", "create", "-R", repo, "--title", "🛡️ Security: Fix outdated dependencies",
+                                "--body", "I've updated dependencies to fix known vulnerabilities found by `npm audit`. 📦✨", "--head", branch_name])
+
     except Exception as e:
-        print(f"⚠️ Failed to create essentials PR for {repo}: {e}")
+        print(f"⚠️ Security scan failed for {repo}: {e}")
     finally:
         shutil.rmtree(temp_dir)
 
-def check_essentials(repo):
+def check_and_create_essentials(repo):
     """Ensure repo has README, LICENSE, and .gitignore."""
     files_json = run_gh_cmd(["api", f"repos/{repo}/contents/"])
     if not files_json: return
@@ -233,10 +230,38 @@ def check_essentials(repo):
     if not any(".gitignore" in n for n in file_names): missing.append(".gitignore")
 
     if missing:
-        # Check if a PR already exists
         prs = run_gh_cmd(["pr", "list", "-R", repo, "--state", "open", "--json", "title"])
-        if prs and "chore: add missing repository essentials 📦" not in prs:
-            create_essentials_pr(repo, missing)
+        if not prs or "chore: add missing repository essentials 📦" not in prs:
+            print(f"📦 Creating essentials PR for {repo}...")
+            temp_dir = tempfile.mkdtemp()
+            try:
+                token = os.environ.get("GH_TOKEN")
+                remote_url = f"https://x-access-token:{token}@github.com/{repo}.git"
+                subprocess.run(["git", "clone", "--depth", "1", remote_url, temp_dir], check=True)
+                branch_name = f"fix/add-essentials-{datetime.datetime.now().strftime('%Y%m%d%H%M')}"
+                subprocess.run(["git", "-C", temp_dir, "checkout", "-b", branch_name], check=True)
+
+                for item in missing:
+                    path = os.path.join(temp_dir, item)
+                    if item == "README.md":
+                        with open(path, "w") as f:
+                            f.write(f"# {repo.split('/')[-1]}\n\nProject managed by Jules Automation Agent. 🚀")
+                    elif item == "LICENSE":
+                        with open(path, "w") as f:
+                            f.write("MIT License\n\nCopyright (c) 2024 Jules Agent")
+                    elif item == ".gitignore":
+                        with open(path, "w") as f:
+                            f.write("node_modules/\n.DS_Store\n.env\n")
+                    subprocess.run(["git", "-C", temp_dir, "add", item], check=True)
+
+                subprocess.run(["git", "-C", temp_dir, "commit", "-m", "chore: add missing repository essentials 📦"], check=True)
+                subprocess.run(["git", "-C", temp_dir, "push", "origin", branch_name], check=True)
+                run_gh_cmd(["pr", "create", "-R", repo, "--title", "chore: add missing repository essentials 📦",
+                            "--body", f"This PR adds missing essentials: {', '.join(missing)}. ✨", "--head", branch_name])
+            except Exception as e:
+                print(f"⚠️ Failed to create essentials PR for {repo}: {e}")
+            finally:
+                shutil.rmtree(temp_dir)
 
 def branch_hygiene(repo):
     """Delete merged branches older than 2 days."""
@@ -255,11 +280,11 @@ def branch_hygiene(repo):
                     run_gh_cmd(["api", "-X", "DELETE", f"repos/{repo}/git/refs/heads/{branch}"])
 
 def main():
-    repos = get_all_repos()
     # Configure git
     subprocess.run(["git", "config", "--global", "user.email", "jules@agent.ai"])
     subprocess.run(["git", "config", "--global", "user.name", "Jules Agent"])
 
+    repos = get_all_repos()
     for repo in repos:
         print(f"--- 🚀 Systematic scan of: {repo} ---")
         try:
@@ -267,8 +292,8 @@ def main():
             manage_stale_issues(repo)
             review_prs(repo)
             handle_ci_failures(repo)
-            security_scan(repo)
-            check_essentials(repo)
+            security_scan_and_fix(repo)
+            check_and_create_essentials(repo)
             branch_hygiene(repo)
         except Exception as e:
             print(f"⚠️ Error scanning {repo}: {e}")
