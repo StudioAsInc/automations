@@ -82,6 +82,22 @@ def manage_stale_issues(repo):
                 run_gh_cmd(["issue", "comment", str(issue["number"]), "-R", repo,
                             "--body", "This issue hasn't had any activity for over 14 days. Is this still relevant? 😴"])
 
+def parse_codeowners(repo):
+    """Attempt to parse CODEOWNERS file for relevant reviewers."""
+    # Try common locations
+    for path in [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"]:
+        content_json = run_gh_cmd(["api", f"repos/{repo}/contents/{path}"])
+        if content_json:
+            try:
+                data = json.loads(content_json)
+                if "content" in data:
+                    content = base64.b64decode(data["content"]).decode('utf-8')
+                    # Very simple parser: find all @mentions
+                    return list(set(re.findall(r"@([\w\-]+)", content)))
+            except:
+                continue
+    return []
+
 def review_prs(repo):
     """Review open PRs for conflicts, missing descriptions, or staleness."""
     prs_json = run_gh_cmd(["pr", "list", "-R", repo, "--state", "open", "--json", "number,title,body,mergeable,updatedAt,author"])
@@ -89,6 +105,8 @@ def review_prs(repo):
 
     prs = json.loads(prs_json)
     now = datetime.datetime.now(datetime.timezone.utc)
+
+    codeowners = parse_codeowners(repo)
 
     for pr in prs:
         summary = "👋 PR status summary:\n"
@@ -117,12 +135,51 @@ def review_prs(repo):
         if requested_json:
             requests = json.loads(requested_json).get("reviewRequests", [])
             if not requests and pr["author"]["login"] != "jules-agent":
-                owner = repo.split('/')[0]
-                print(f"👥 Requesting review from {owner} for PR #{pr['number']}")
-                run_gh_cmd(["pr", "edit", str(pr["number"]), "-R", repo, "--add-reviewer", owner])
+                reviewers = codeowners if codeowners else [repo.split('/')[0]]
+                print(f"👥 Requesting review from {reviewers} for PR #{pr['number']}")
+                for reviewer in reviewers:
+                    run_gh_cmd(["pr", "edit", str(pr["number"]), "-R", repo, "--add-reviewer", reviewer])
+
+def attempt_fix_and_push(repo, pr_number, logs):
+    """Analyze logs and attempt to push a fix commit."""
+    # This is a complex task. For now, we implement a simple fix for common issues.
+    # We clone the PR branch, apply a fix, and push.
+    print(f"🔧 Attempting to fix CI failure for {repo} PR #{pr_number}...")
+    temp_dir = tempfile.mkdtemp()
+    try:
+        token = os.environ.get("GH_TOKEN")
+        remote_url = f"https://x-access-token:{token}@github.com/{repo}.git"
+
+        # Checkout the PR
+        run_gh_cmd(["repo", "clone", repo, temp_dir])
+        subprocess.run(["gh", "pr", "checkout", str(pr_number)], cwd=temp_dir, check=True)
+
+        fixed = False
+        # Logic: If it's a lint error, try npm lint --fix
+        if "lint" in logs.lower() or "prettier" in logs.lower():
+            if os.path.exists(os.path.join(temp_dir, "package.json")):
+                print("🪄 Found package.json, attempting `npm run lint --fix`...")
+                subprocess.run(["npm", "install"], cwd=temp_dir)
+                subprocess.run(["npm", "run", "lint", "--", "--fix"], cwd=temp_dir)
+                fixed = True
+
+        if fixed:
+            diff = subprocess.run(["git", "-C", temp_dir, "diff", "--exit-code"])
+            if diff.returncode != 0:
+                print("✅ Fixes applied, pushing commit...")
+                subprocess.run(["git", "-C", temp_dir, "add", "."], check=True)
+                subprocess.run(["git", "-C", temp_dir, "commit", "-m", "fix: automated CI failure resolution (lint/format) 🤖🔧"], check=True)
+                subprocess.run(["git", "-C", temp_dir, "push", "origin", "HEAD"], check=True)
+                run_gh_cmd(["pr", "comment", str(pr_number), "-R", repo, "--body", "I've pushed an automated fix for the CI failure! 🚀🔧"])
+            else:
+                print("ℹ️ No changes to push after fix attempt.")
+    except Exception as e:
+        print(f"⚠️ Failed to attempt fix for {repo} PR #{pr_number}: {e}")
+    finally:
+        shutil.rmtree(temp_dir)
 
 def handle_ci_failures(repo):
-    """Detect CI failures and attempt analysis."""
+    """Detect CI failures, analyze, and attempt fix."""
     prs_json = run_gh_cmd(["pr", "list", "-R", repo, "--state", "open", "--json", "number,headRefName"])
     if not prs_json: return
 
@@ -141,8 +198,12 @@ def handle_ci_failures(repo):
                         run_id = runs[0]["databaseId"]
                         logs = run_gh_cmd(["run", "view", str(run_id), "-R", repo, "--log-failed"])
                         if logs:
+                            # Attempt fix
+                            attempt_fix_and_push(repo, pr["number"], logs)
+
+                            # Log summary
                             error_lines = [line for line in logs.splitlines() if "error" in line.lower()][-10:]
-                            msg = f"🚨 **CI Failure Detected!**\n\nRecent Errors:\n```\n" + "\n".join(error_lines) + "\n```\nI am analyzing the logs for a potential fix! 🔍🔧"
+                            msg = f"🚨 **CI Failure Detected!**\n\nRecent Errors:\n```\n" + "\n".join(error_lines) + "\n```\nI have attempted an automated fix! 🔍🔧"
 
                             comments_json = run_gh_cmd(["pr", "view", str(pr["number"]), "-R", repo, "--json", "comments"])
                             if comments_json:
@@ -241,6 +302,7 @@ def check_and_create_essentials(repo):
                 branch_name = f"fix/add-essentials-{datetime.datetime.now().strftime('%Y%m%d%H%M')}"
                 subprocess.run(["git", "-C", temp_dir, "checkout", "-b", branch_name], check=True)
 
+                year = datetime.datetime.now().year
                 for item in missing:
                     path = os.path.join(temp_dir, item)
                     if item == "README.md":
@@ -248,7 +310,7 @@ def check_and_create_essentials(repo):
                             f.write(f"# {repo.split('/')[-1]}\n\nProject managed by Jules Automation Agent. 🚀")
                     elif item == "LICENSE":
                         with open(path, "w") as f:
-                            f.write("MIT License\n\nCopyright (c) 2024 Jules Agent")
+                            f.write(f"MIT License\n\nCopyright (c) {year} Jules Agent")
                     elif item == ".gitignore":
                         with open(path, "w") as f:
                             f.write("node_modules/\n.DS_Store\n.env\n")
@@ -283,6 +345,11 @@ def main():
     # Configure git
     subprocess.run(["git", "config", "--global", "user.email", "jules@agent.ai"])
     subprocess.run(["git", "config", "--global", "user.name", "Jules Agent"])
+
+    # Auth
+    token = os.environ.get("GH_TOKEN")
+    if token:
+        subprocess.run(f"gh auth login --with-token <<< {token}", shell=True, executable="/bin/bash")
 
     repos = get_all_repos()
     for repo in repos:
