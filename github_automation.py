@@ -17,6 +17,15 @@ def run_gh_cmd(cmd):
         return None
     return result.stdout
 
+def install_gh_cli():
+    """Ensure gh cli is installed."""
+    if shutil.which("gh") is None:
+        print("📥 Installing GitHub CLI...")
+        subprocess.run(["sudo", "apt-get", "update"], check=True)
+        subprocess.run(["sudo", "apt-get", "install", "-y", "gh"], check=True)
+    else:
+        print("✅ GitHub CLI is already installed.")
+
 def get_all_repos():
     """Fetches all repositories from personal account and all organizations."""
     print("🔍 Scanning GitHub account and organizations...")
@@ -30,8 +39,13 @@ def get_all_repos():
     # Org repos
     orgs_stdout = run_gh_cmd(["org", "list"])
     if orgs_stdout:
-        orgs = orgs_stdout.splitlines()
-        for org in orgs:
+        # Extract the first column (org name) from the table
+        org_lines = orgs_stdout.splitlines()
+        for line in org_lines:
+            parts = line.split()
+            if not parts: continue
+            org = parts[0]
+            print(f"🏢 Scanning organization: {org}")
             org_repos_json = run_gh_cmd(["repo", "list", org, "--limit", "1000", "--json", "nameWithOwner,isArchived"])
             if org_repos_json:
                 repos.extend([r["nameWithOwner"] for r in json.loads(org_repos_json) if not r["isArchived"]])
@@ -84,7 +98,6 @@ def manage_stale_issues(repo):
 
 def parse_codeowners(repo):
     """Attempt to parse CODEOWNERS file for relevant reviewers."""
-    # Try common locations
     for path in [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"]:
         content_json = run_gh_cmd(["api", f"repos/{repo}/contents/{path}"])
         if content_json:
@@ -92,7 +105,6 @@ def parse_codeowners(repo):
                 data = json.loads(content_json)
                 if "content" in data:
                     content = base64.b64decode(data["content"]).decode('utf-8')
-                    # Very simple parser: find all @mentions
                     return list(set(re.findall(r"@([\w\-]+)", content)))
             except:
                 continue
@@ -142,20 +154,16 @@ def review_prs(repo):
 
 def attempt_fix_and_push(repo, pr_number, logs):
     """Analyze logs and attempt to push a fix commit."""
-    # This is a complex task. For now, we implement a simple fix for common issues.
-    # We clone the PR branch, apply a fix, and push.
     print(f"🔧 Attempting to fix CI failure for {repo} PR #{pr_number}...")
     temp_dir = tempfile.mkdtemp()
     try:
         token = os.environ.get("GH_TOKEN")
         remote_url = f"https://x-access-token:{token}@github.com/{repo}.git"
 
-        # Checkout the PR
         run_gh_cmd(["repo", "clone", repo, temp_dir])
         subprocess.run(["gh", "pr", "checkout", str(pr_number)], cwd=temp_dir, check=True)
 
         fixed = False
-        # Logic: If it's a lint error, try npm lint --fix
         if "lint" in logs.lower() or "prettier" in logs.lower():
             if os.path.exists(os.path.join(temp_dir, "package.json")):
                 print("🪄 Found package.json, attempting `npm run lint --fix`...")
@@ -171,8 +179,6 @@ def attempt_fix_and_push(repo, pr_number, logs):
                 subprocess.run(["git", "-C", temp_dir, "commit", "-m", "fix: automated CI failure resolution (lint/format) 🤖🔧"], check=True)
                 subprocess.run(["git", "-C", temp_dir, "push", "origin", "HEAD"], check=True)
                 run_gh_cmd(["pr", "comment", str(pr_number), "-R", repo, "--body", "I've pushed an automated fix for the CI failure! 🚀🔧"])
-            else:
-                print("ℹ️ No changes to push after fix attempt.")
     except Exception as e:
         print(f"⚠️ Failed to attempt fix for {repo} PR #{pr_number}: {e}")
     finally:
@@ -188,7 +194,7 @@ def handle_ci_failures(repo):
         checks_json = run_gh_cmd(["pr", "checks", str(pr["number"]), "-R", repo, "--json", "status,conclusion,name"])
         if checks_json:
             checks = json.loads(checks_json)
-            failed = [c for c in (checks if isinstance(checks, list) else [checks]) if c.get("conclusion") == "failure"]
+            failed = [c for c in (checks if isinstance(checks, list) else [checks]) if c.get("conclusion", "").upper() == "FAILURE"]
             if failed:
                 print(f"❌ CI failure in {repo} PR #{pr['number']}")
                 runs_json = run_gh_cmd(["run", "list", "-R", repo, "--branch", f"pull/{pr['number']}/head", "--limit", "1", "--json", "databaseId"])
@@ -198,10 +204,8 @@ def handle_ci_failures(repo):
                         run_id = runs[0]["databaseId"]
                         logs = run_gh_cmd(["run", "view", str(run_id), "-R", repo, "--log-failed"])
                         if logs:
-                            # Attempt fix
                             attempt_fix_and_push(repo, pr["number"], logs)
 
-                            # Log summary
                             error_lines = [line for line in logs.splitlines() if "error" in line.lower()][-10:]
                             msg = f"🚨 **CI Failure Detected!**\n\nRecent Errors:\n```\n" + "\n".join(error_lines) + "\n```\nI have attempted an automated fix! 🔍🔧"
 
@@ -258,7 +262,6 @@ def security_scan_and_fix(repo):
             run_gh_cmd(["pr", "create", "-R", repo, "--title", "🔒 Security: Redact potential hardcoded secrets",
                         "--body", "I found potential secrets in the codebase and redacted them. Please review and rotate these secrets! 🛡️✨", "--head", branch_name])
 
-        # Check for outdated dependencies (npm)
         if os.path.exists(os.path.join(temp_dir, "package.json")):
             print(f"📦 Checking for outdated dependencies in {repo}...")
             audit_result = subprocess.run(["npm", "audit", "--json"], cwd=temp_dir, capture_output=True, text=True)
@@ -342,6 +345,7 @@ def branch_hygiene(repo):
                     run_gh_cmd(["api", "-X", "DELETE", f"repos/{repo}/git/refs/heads/{branch}"])
 
 def main():
+    install_gh_cli()
     # Configure git
     subprocess.run(["git", "config", "--global", "user.email", "jules@agent.ai"])
     subprocess.run(["git", "config", "--global", "user.name", "Jules Agent"])
