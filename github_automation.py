@@ -6,6 +6,7 @@ import re
 import base64
 import tempfile
 import shutil
+import sys
 
 # Jules GitHub Automation Agent Script 🤖
 # Rule: Always use emojis in every comment or message you post. 🚀✨📦
@@ -20,9 +21,22 @@ def run_gh_cmd(cmd):
 def install_gh_cli():
     """Ensure gh cli is installed."""
     if shutil.which("gh") is None:
-        print("📥 Installing GitHub CLI...")
-        subprocess.run(["sudo", "apt-get", "update"], check=True)
-        subprocess.run(["sudo", "apt-get", "install", "-y", "gh"], check=True)
+        print("📥 Attempting to install GitHub CLI...")
+        if sys.platform.startswith("linux"):
+            try:
+                subprocess.run(["sudo", "apt-get", "update"], check=True)
+                subprocess.run(["sudo", "apt-get", "install", "-y", "gh"], check=True)
+                print("✅ GitHub CLI installed successfully.")
+            except Exception as e:
+                print(f"❌ Failed to install gh cli on Linux: {e}")
+        elif sys.platform == "darwin":
+            try:
+                subprocess.run(["brew", "install", "gh"], check=True)
+                print("✅ GitHub CLI installed successfully via Homebrew.")
+            except Exception as e:
+                print(f"❌ Failed to install gh cli on macOS: {e}")
+        else:
+            print("⚠️ Automatic installation not supported for this OS. Please install 'gh' manually! 🛠️")
     else:
         print("✅ GitHub CLI is already installed.")
 
@@ -39,11 +53,11 @@ def get_all_repos():
     # Org repos
     orgs_stdout = run_gh_cmd(["org", "list"])
     if orgs_stdout:
-        # Extract the first column (org name) from the table
+        # Extract the first column (org name) from the table, skipping header
         org_lines = orgs_stdout.splitlines()
         for line in org_lines:
             parts = line.split()
-            if not parts: continue
+            if not parts or parts[0].upper() == "ORGANIZATION": continue
             org = parts[0]
             print(f"🏢 Scanning organization: {org}")
             org_repos_json = run_gh_cmd(["repo", "list", org, "--limit", "1000", "--json", "nameWithOwner,isArchived"])
@@ -105,7 +119,7 @@ def parse_codeowners(repo):
                 data = json.loads(content_json)
                 if "content" in data:
                     content = base64.b64decode(data["content"]).decode('utf-8')
-                    return list(set(re.findall(r"@([\w\-]+)", content)))
+                    return list(set(re.findall(r"@([\w\-/]+)", content)))
             except:
                 continue
     return []
