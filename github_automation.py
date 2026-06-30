@@ -24,8 +24,11 @@ def install_gh_cli():
         print("📥 Attempting to install GitHub CLI...")
         if sys.platform.startswith("linux"):
             try:
-                subprocess.run(["sudo", "apt-get", "update"], check=True)
-                subprocess.run(["sudo", "apt-get", "install", "-y", "gh"], check=True)
+                # Use -y and non-interactive frontend to avoid hanging
+                env = os.environ.copy()
+                env["DEBIAN_FRONTEND"] = "noninteractive"
+                subprocess.run(["sudo", "-E", "apt-get", "update"], check=True, env=env)
+                subprocess.run(["sudo", "-E", "apt-get", "install", "-y", "gh"], check=True, env=env)
                 print("✅ GitHub CLI installed successfully.")
             except Exception as e:
                 print(f"❌ Failed to install gh cli on Linux: {e}")
@@ -177,12 +180,24 @@ def attempt_fix_and_push(repo, pr_number, logs):
         run_gh_cmd(["repo", "clone", repo, temp_dir])
         subprocess.run(["gh", "pr", "checkout", str(pr_number)], cwd=temp_dir, check=True)
 
+        # Configure local git
+        subprocess.run(["git", "-C", temp_dir, "config", "user.email", "jules@agent.ai"])
+        subprocess.run(["git", "-C", temp_dir, "config", "user.name", "Jules Agent"])
+
         fixed = False
+        # Ecosystem fix: Node.js
         if "lint" in logs.lower() or "prettier" in logs.lower():
             if os.path.exists(os.path.join(temp_dir, "package.json")):
                 print("🪄 Found package.json, attempting `npm run lint --fix`...")
                 subprocess.run(["npm", "install"], cwd=temp_dir)
                 subprocess.run(["npm", "run", "lint", "--", "--fix"], cwd=temp_dir)
+                fixed = True
+
+        # Ecosystem fix: Kotlin/Gradle (Spotless)
+        if "spotless" in logs.lower():
+            if os.path.exists(os.path.join(temp_dir, "gradlew")):
+                print("🪄 Found gradle wrapper, attempting `./gradlew spotlessApply`...")
+                subprocess.run(["./gradlew", "spotlessApply"], cwd=temp_dir)
                 fixed = True
 
         if fixed:
@@ -211,7 +226,8 @@ def handle_ci_failures(repo):
             failed = [c for c in (checks if isinstance(checks, list) else [checks]) if c.get("conclusion", "").upper() == "FAILURE"]
             if failed:
                 print(f"❌ CI failure in {repo} PR #{pr['number']}")
-                runs_json = run_gh_cmd(["run", "list", "-R", repo, "--branch", f"pull/{pr['number']}/head", "--limit", "1", "--json", "databaseId"])
+                # Using --pr flag for robust run detection
+                runs_json = run_gh_cmd(["run", "list", "-R", repo, "--pr", str(pr["number"]), "--limit", "1", "--json", "databaseId"])
                 if runs_json:
                     runs = json.loads(runs_json)
                     if runs:
@@ -238,9 +254,13 @@ def security_scan_and_fix(repo):
         remote_url = f"https://x-access-token:{token}@github.com/{repo}.git"
         subprocess.run(["git", "clone", "--depth", "1", remote_url, temp_dir], check=True)
 
+        # Configure local git
+        subprocess.run(["git", "-C", temp_dir, "config", "user.email", "jules@agent.ai"])
+        subprocess.run(["git", "-C", temp_dir, "config", "user.name", "Jules Agent"])
+
         sensitive_patterns = {
             "GitHub PAT": (r"ghp_[a-zA-Z0-9]{36}", "ghp_REDACTED_BY_JULES"),
-            "Generic Secret": (r"(?i)(secret|password|key|token)\s*[:=]\s*['\"]([a-zA-Z0-9\-_]{16,})['\"]", r"\1: 'REDACTED_BY_JULES'")
+            "Generic Secret": (r"(?i)(secret|password|key|token)(\s*[:=]\s*)['\"]([a-zA-Z0-9\-_]{16,})['\"]", r"\1\2'REDACTED_BY_JULES'")
         }
 
         changed = False
@@ -277,7 +297,7 @@ def security_scan_and_fix(repo):
                         "--body", "I found potential secrets in the codebase and redacted them. Please review and rotate these secrets! 🛡️✨", "--head", branch_name])
 
         if os.path.exists(os.path.join(temp_dir, "package.json")):
-            print(f"📦 Checking for outdated dependencies in {repo}...")
+            print(f"📦 Checking for Node.js vulnerabilities in {repo}...")
             audit_result = subprocess.run(["npm", "audit", "--json"], cwd=temp_dir, capture_output=True, text=True)
             if audit_result.returncode != 0:
                 print(f"⚠️ Vulnerabilities found in {repo}. Attempting fix...")
@@ -316,6 +336,11 @@ def check_and_create_essentials(repo):
                 token = os.environ.get("GH_TOKEN")
                 remote_url = f"https://x-access-token:{token}@github.com/{repo}.git"
                 subprocess.run(["git", "clone", "--depth", "1", remote_url, temp_dir], check=True)
+
+                # Configure local git
+                subprocess.run(["git", "-C", temp_dir, "config", "user.email", "jules@agent.ai"])
+                subprocess.run(["git", "-C", temp_dir, "config", "user.name", "Jules Agent"])
+
                 branch_name = f"fix/add-essentials-{datetime.datetime.now().strftime('%Y%m%d%H%M')}"
                 subprocess.run(["git", "-C", temp_dir, "checkout", "-b", branch_name], check=True)
 
@@ -360,9 +385,6 @@ def branch_hygiene(repo):
 
 def main():
     install_gh_cli()
-    # Configure git
-    subprocess.run(["git", "config", "--global", "user.email", "jules@agent.ai"])
-    subprocess.run(["git", "config", "--global", "user.name", "Jules Agent"])
 
     # Auth
     token = os.environ.get("GH_TOKEN")
