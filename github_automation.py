@@ -24,11 +24,11 @@ def install_gh_cli():
         print("📥 Attempting to install GitHub CLI...")
         if sys.platform.startswith("linux"):
             try:
-                # DEBIAN_FRONTEND=noninteractive to avoid hanging
                 env = os.environ.copy()
                 env["DEBIAN_FRONTEND"] = "noninteractive"
-                subprocess.run(["sudo", "-E", "apt-get", "update"], check=True, env=env)
-                subprocess.run(["sudo", "-E", "apt-get", "install", "-y", "gh"], check=True, env=env)
+                sudo_prefix = ["sudo", "-E"] if shutil.which("sudo") else []
+                subprocess.run(sudo_prefix + ["apt-get", "update"], check=True, env=env)
+                subprocess.run(sudo_prefix + ["apt-get", "install", "-y", "gh"], check=True, env=env)
                 print("✅ GitHub CLI installed successfully.")
             except Exception as e:
                 print(f"❌ Failed to install gh cli on Linux: {e}")
@@ -157,7 +157,7 @@ def review_prs(repo):
                 if not any("PR status summary:" in c["body"] for c in comments):
                     print(f"📝 Posting summary on PR #{pr['number']} in {repo}")
                     summary += "\n".join([f"- {p}" for p in problems])
-                    run_gh_cmd(["pr", "comment", str(pr["number"]), "-R", repo, "--body", summary + "\nPlease take a look! ✨"])
+                    run_gh_cmd(["pr", "comment", str(pr['number']), "-R", repo, "--body", summary + "\nPlease take a look! ✨"])
 
         # Auto-request review
         requested_json = run_gh_cmd(["pr", "view", str(pr["number"]), "-R", repo, "--json", "reviewRequests"])
@@ -255,6 +255,7 @@ def security_scan_and_fix(repo):
         remote_url = f"https://x-access-token:{token}@github.com/{repo}.git"
         subprocess.run(["git", "clone", "--depth", "1", remote_url, temp_dir], check=True)
 
+        # Configure local git
         subprocess.run(["git", "-C", temp_dir, "config", "user.email", "jules@agent.ai"])
         subprocess.run(["git", "-C", temp_dir, "config", "user.name", "Jules Agent"])
 
@@ -268,6 +269,10 @@ def security_scan_and_fix(repo):
             if ".git" in root: continue
             for file in files:
                 filepath = os.path.join(root, file)
+
+                # Skip broken symlinks or missing files reported by walk
+                if not os.path.exists(filepath): continue
+                if os.path.islink(filepath): continue
                 if os.path.getsize(filepath) > 100000: continue
 
                 try:
@@ -337,6 +342,7 @@ def check_and_create_essentials(repo):
                 remote_url = f"https://x-access-token:{token}@github.com/{repo}.git"
                 subprocess.run(["git", "clone", "--depth", "1", remote_url, temp_dir], check=True)
 
+                # Configure local git
                 subprocess.run(["git", "-C", temp_dir, "config", "user.email", "jules@agent.ai"])
                 subprocess.run(["git", "-C", temp_dir, "config", "user.name", "Jules Agent"])
 
