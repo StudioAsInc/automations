@@ -56,13 +56,15 @@ def get_all_repos():
     # Org repos
     orgs_stdout = run_gh_cmd(["org", "list"])
     if orgs_stdout:
-        # Extract the first column (org name) from the table, skipping header
-        org_lines = orgs_stdout.splitlines()
+        # Extract org names from the output. Handle potential headers or empty lines.
+        org_lines = orgs_stdout.strip().splitlines()
         for line in org_lines:
             parts = line.split()
-            if not parts or parts[0].upper() == "ORGANIZATION": continue
+            if not parts: continue
+            # Skip header if present
+            if parts[0].lower() == "organization": continue
             org = parts[0]
-            print(f"🏢 Scanning organization: {org}")
+            print(f"🏢 Scanning organization: {org}...")
             org_repos_json = run_gh_cmd(["repo", "list", org, "--limit", "1000", "--json", "nameWithOwner,isArchived"])
             if org_repos_json:
                 repos.extend([r["nameWithOwner"] for r in json.loads(org_repos_json) if not r["isArchived"]])
@@ -392,9 +394,20 @@ def main():
     install_gh_cli()
 
     token = os.environ.get("GH_TOKEN")
-    if token:
-        # Use stdin to avoid shell injection and visible token in process list
-        run_gh_cmd(["auth", "login", "--with-token"], input_text=token)
+    if not token:
+        print("❌ GH_TOKEN environment variable is missing! 🔑")
+        sys.exit(1)
+
+    # Ensure we are logged in using the token provided
+    run_gh_cmd(["auth", "login", "--with-token"], input_text=token)
+
+    # Check auth status to be sure
+    status = run_gh_cmd(["auth", "status"])
+    if not status or "Logged in" not in status:
+        print("❌ Failed to authenticate with GitHub CLI. 🛑")
+        sys.exit(1)
+    else:
+        print("✅ Authenticated successfully! 🤖")
 
     repos = get_all_repos()
     for repo in repos:
